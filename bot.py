@@ -17,52 +17,81 @@ class VerifyView(discord.ui.View):
         super().__init__(timeout=None)
         self.user_id = user_id
         self.guild_id = guild_id
+        
+        # Жестко привязываем custom_id для персистентности
+        self.approve_btn.custom_id = f"verify_approve:{user_id}:{guild_id}"
+        self.reject_btn.custom_id = f"verify_reject:{user_id}:{guild_id}"
 
     @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success)
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def approve_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Говорим Дискорду, что мы приняли запрос и думаем (защита от 3 секунд)
+        await interaction.response.defer(ephemeral=True)
+
+        if not hasattr(self, 'guild_id'):
+            _, user_id, guild_id = button.custom_id.split(":")
+            self.user_id, self.guild_id = int(user_id), int(guild_id)
+
         guild = bot.get_guild(self.guild_id)
+        if not guild:
+            await interaction.followup.send("❌ Server not found!", ephemeral=True)
+            return
+
         member = guild.get_member(self.user_id)
         role = discord.utils.get(guild.roles, name=ROLE_NAME)
 
         if not member:
-            await interaction.response.send_message("❌ User not found on server!", ephemeral=True)
+            await interaction.followup.send("❌ User not found on server!", ephemeral=True)
             return
 
         if not role:
-            await interaction.response.send_message("❌ Role not found!", ephemeral=True)
+            await interaction.followup.send("❌ Role not found!", ephemeral=True)
             return
 
-        await member.add_roles(role)
-        await interaction.response.send_message(f"✅ {member.name} has been approved and given the {ROLE_NAME} role!")
-
-        # Notify the user
-        await member.send(f"✅ Your screenshot has been approved! You've been given the **{ROLE_NAME}** role.")
-        self.stop()
+        try:
+            await member.add_roles(role)
+            # Меняем исходное сообщение админа, убирая кнопки, чтобы не нажать дважды
+            await interaction.message.edit(content=f"✅ Approved for {member.name}", view=None, embed=interaction.message.embeds[0])
+            
+            # Отправляем уведомление юзеру
+            await member.send(f"✅ Your screenshot has been approved! You've been given the **{ROLE_NAME}** role.")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to give this role! Check role hierarchy.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger)
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        if not hasattr(self, 'guild_id'):
+            _, user_id, guild_id = button.custom_id.split(":")
+            self.user_id, self.guild_id = int(user_id), int(guild_id)
+
         guild = bot.get_guild(self.guild_id)
-        member = guild.get_member(self.user_id)
+        member = guild.get_member(self.user_id) if guild else None
+        username = member.name if member else f"User ({self.user_id})"
 
-        await interaction.response.send_message(f"❌ {member.name} has been rejected.")
+        # Убираем кнопки у админа
+        await interaction.message.edit(content=f"❌ Rejected for {username}", view=None, embed=interaction.message.embeds[0])
 
-        # Notify the user
-        await member.send("❌ Your screenshot has been rejected.")
-        self.stop()
+        if member:
+            try:
+                await member.send("❌ Your screenshot has been rejected.")
+            except discord.Forbidden:
+                pass
 
 @bot.event
 async def on_ready():
+    # Регистрируем пустую View для старых кнопок
+    bot.add_view(VerifyView(0, 0)) 
     print(f"✅ Bot is running: {bot.user}")
 
 @bot.event
 async def on_message(message):
-    # Ignore messages from bots
     if message.author.bot:
         return
 
-    # Only handle DMs with attachments
     if isinstance(message.channel, discord.DMChannel) and message.attachments:
-        # Find the guild
         guild = None
         for g in bot.guilds:
             member = g.get_member(message.author.id)
@@ -74,7 +103,6 @@ async def on_message(message):
             await message.channel.send("❌ You are not on the server!")
             return
 
-        # Forward to admin
         admin = await bot.fetch_user(MY_ID)
         embed = discord.Embed(
             title="📸 New Screenshot",
